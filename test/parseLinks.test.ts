@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 
-import { parseLinks } from '../src/crawler/parseLinks.js';
+import { parseLinks } from '../src/crawler/parsing/parseLinks.js';
 
 describe('parseLinks', () => {
   it('returns unique href values', () => {

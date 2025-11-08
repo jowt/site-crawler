@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 
-import { sameSubdomain } from '../src/util/sameSubdomain.js';
+import { sameSubdomain } from '../src/crawler/url/sameSubdomain.js';
 
 describe('sameSubdomain', () => {
   it('returns true for identical hostnames ignoring case', () => {

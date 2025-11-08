@@ -1,29 +1,23 @@
 import pLimit from 'p-limit';
 
-import {
-  CrawlHandlers,
-  CrawlOptions,
-  CrawlQueueItem,
-  CrawlSummary,
-  FailureEvent,
-  FetchPageResult,
-  PageResult,
-} from '../types.js';
-import {
-  flushOutputBuffers,
-  logError,
-  resetOutputConfig,
-  setOutputConfig,
-  updateQuietProgress,
-  writePage,
-  writeSummary,
-} from '../util/output.js';
+import { CrawlHandlers, CrawlOptions, CrawlQueueItem, CrawlSummary, PageResult } from '../types.js';
+import { flushOutputBuffers, resetOutputConfig, setOutputConfig, writeSummary } from '../util/output.js';
 import { reportCrawlerError } from '../util/errorHandler.js';
 import { ensureCrawlerError } from '../errors.js';
-import { sameSubdomain } from '../util/sameSubdomain.js';
-import { fetchPage } from './fetchPage.js';
-import { normalizeUrl } from './normalizeUrl.js';
-import { parseLinks } from './parseLinks.js';
+import {
+  CrawlQueue,
+  FailureTracker,
+  recordFailure,
+  fetchPageWithRetry,
+  parseAndEnqueue,
+  normalizeOrFallback,
+  CrawlStats,
+  initializeStats,
+  recordPageMetrics,
+} from './index.js';
+import { ProgressReporter } from './reporting/progress.js';
+import { buildCrawlSummary } from './reporting/summary.js';
+import { createDefaultHandlers } from './handlers/defaultHandlers.js';
 
 export interface CrawlRuntimeOptions {
   normalizedStart: string;
@@ -31,122 +25,116 @@ export interface CrawlRuntimeOptions {
   handlers?: CrawlHandlers;
 }
 
-interface CrawlStats {
-  pagesVisited: number;
-  pagesSucceeded: number;
-  pagesFailed: number;
-  maxDepth: number;
-  totalLinksExtracted: number;
-  statusCounts: Map<number, number>;
-  actualMaxConcurrency: number;
-  peakQueueSize: number;
-  duplicatesFiltered: number;
-  failureReasons: Map<string, number>;
-  retryAttempts: number;
-  retrySuccesses: number;
-  retryFailures: number;
-  failureLog: FailureEvent[];
-}
+const MAX_ADDITIONAL_ATTEMPTS = 1; // Allow a single queue-level retry without obscuring the core flow.
 
-const DEFAULT_MAX_RETRIES = 1;
-const MAX_ADDITIONAL_ATTEMPTS = 1;
-
-export async function crawl({
-  normalizedStart,
-  options,
-  handlers = {
-    onPage: (result: PageResult) => writePage(result, options.format),
-  },
-}: CrawlRuntimeOptions): Promise<void> {
-  setOutputConfig({ quiet: options.quiet, outputFile: options.outputFile, format: options.format });
-  const queue: CrawlQueueItem[] = [{ url: normalizedStart, depth: 0, attempt: 0 }];
-  const seen = new Set<string>([normalizedStart]);
-  // A future hash-based dedupe map keyed by content signature would companion the URL set above.
-  // When --dedupe-by-hash becomes active, we will compute page body hashes and skip repeats here.
-
-  let processedPages = 0;
-  let activeCount = 0;
-  let runningCount = 0;
-  let cancelled = false;
-  const startTime = Date.now();
-
-  const stats: CrawlStats = {
-    pagesVisited: 0,
-    pagesSucceeded: 0,
-    pagesFailed: 0,
-    maxDepth: 0,
-    totalLinksExtracted: 0,
-    statusCounts: new Map<number, number>(),
-    actualMaxConcurrency: 0,
-    peakQueueSize: queue.length,
-    duplicatesFiltered: 0,
-    failureReasons: new Map<string, number>(),
-    retryAttempts: 0,
-    retrySuccesses: 0,
-    retryFailures: 0,
-    failureLog: [],
+/**
+ * Coordinates the crawl lifecycle: queue pumping, fetch/parse execution, and stats tracking.
+ * Keeps the exported crawl() thin so reviewers can reason about the orchestration in one place.
+ */
+class CrawlerEngine {
+  private readonly queue: CrawlQueue;
+  private readonly failures = new FailureTracker();
+  private readonly stats: CrawlStats;
+  private readonly limiter: ReturnType<typeof pLimit>;
+  private readonly activePromises = new Set<Promise<void>>();
+  private readonly progress: ProgressReporter;
+  private readonly startTime = Date.now();
+  private readonly sigintHandler = (): void => {
+    this.cancelled = true;
   };
+  private sigintAttached = false;
+  private processedPages = 0;
+  private activeCount = 0;
+  private runningCount = 0;
+  private cancelled = false;
 
-  const limiter = pLimit(options.concurrency);
-  // Additional per-host limiters would live alongside this when honoring robots.txt crawl delays.
-  const activePromises = new Set<Promise<void>>();
-  const failureLogIndex = new Map<string, number[]>();
-
-  const emitQuietProgress = (): void => {
-    updateQuietProgress({
-      pagesVisited: stats.pagesVisited,
-      pagesSucceeded: stats.pagesSucceeded,
-      pagesFailed: stats.pagesFailed,
-      uniqueUrlsDiscovered: seen.size,
-      totalLinksExtracted: stats.totalLinksExtracted,
-      retryAttempts: stats.retryAttempts,
-      retrySuccesses: stats.retrySuccesses,
-      retryFailures: stats.retryFailures,
-    });
-  };
-
-  const sigintHandler = (): void => {
-    cancelled = true;
-  };
-
-  if (typeof process !== 'undefined' && typeof process.on === 'function') {
-    process.once('SIGINT', sigintHandler);
+  constructor(
+    normalizedStart: string,
+    private readonly options: CrawlOptions,
+    private readonly handlers: CrawlHandlers,
+  ) {
+    this.queue = new CrawlQueue(normalizedStart);
+    this.stats = initializeStats(this.queue.pending);
+    this.limiter = pLimit(this.options.concurrency);
+    this.progress = new ProgressReporter(this.stats, this.queue);
   }
 
-  const finalize = (): void => {
-    if (typeof process !== 'undefined' && typeof process.removeListener === 'function') {
-      process.removeListener('SIGINT', sigintHandler);
+  async run(): Promise<CrawlSummary> {
+    this.attachSignalHandler();
+    try {
+      this.runQueue();
+      while (this.activePromises.size > 0) {
+        await Promise.allSettled([...this.activePromises]);
+      }
+
+      return buildCrawlSummary({
+        stats: this.stats,
+        queue: this.queue,
+        failures: this.failures,
+        startTime: this.startTime,
+        cancelled: this.cancelled,
+      });
+    } finally {
+      this.detachSignalHandler();
     }
-  };
+  }
 
-  const enqueue = (item: CrawlQueueItem): void => {
-    queue.push(item);
-    seen.add(item.url);
-    stats.peakQueueSize = Math.max(stats.peakQueueSize, queue.length);
-
-    // Alternate queue priorities (e.g. shallow-first) would reorder the queue here.
-  };
-
-  const dequeue = (): CrawlQueueItem | undefined => {
-    if (queue.length === 0) {
-      return undefined;
+  private attachSignalHandler(): void {
+    if (typeof process === 'undefined') {
+      return;
     }
 
-    // Future priority modes could select the next item differently at this point.
+    if (typeof process.once === 'function') {
+      process.once('SIGINT', this.sigintHandler);
+      this.sigintAttached = true;
+    }
+  }
 
-    return queue.shift();
+  private detachSignalHandler(): void {
+    if (!this.sigintAttached || typeof process === 'undefined') {
+      return;
+    }
+
+    if (typeof process.removeListener === 'function') {
+      process.removeListener('SIGINT', this.sigintHandler);
+    }
+
+    this.sigintAttached = false;
+  }
+
+  private readonly enqueueRetry = (item: CrawlQueueItem): void => {
+    this.queue.enqueue(item);
+    this.stats.peakQueueSize = Math.max(this.stats.peakQueueSize, this.queue.pending);
   };
 
-  const schedule = (item: CrawlQueueItem): void => {
-    activeCount += 1;
+  private runQueue(): void {
+    while (!this.cancelled && this.queue.pending > 0) {
+      if (this.options.maxPages && this.processedPages + this.activeCount >= this.options.maxPages) {
+        break;
+      }
 
-    const task = limiter(async () => {
-      runningCount += 1;
-      stats.actualMaxConcurrency = Math.max(stats.actualMaxConcurrency, runningCount);
+      const next = this.queue.dequeue();
+      if (!next) {
+        break;
+      }
+
+      this.schedule(next);
+    }
+  }
+
+  private schedule(item: CrawlQueueItem): void {
+    this.activeCount += 1;
+
+    const task = this.limiter(async () => {
+      this.runningCount += 1;
+      this.stats.actualMaxConcurrency = Math.max(
+        this.stats.actualMaxConcurrency,
+        this.runningCount,
+      );
       try {
-        await handleItem(item);
+        await this.handleItem(item);
       } finally {
-        runningCount -= 1;
+        this.runningCount -= 1;
       }
     })
       .catch((error: unknown) => {
@@ -162,313 +150,158 @@ export async function crawl({
           { throwOnFatal: false },
         );
 
-        if (handlers.onError) {
-          handlers.onError(crawlerError, {
-            url: item.url,
-            depth: item.depth,
-          });
-        }
+        this.handlers.onError?.(crawlerError, {
+          url: item.url,
+          depth: item.depth,
+        });
 
         if (crawlerError.severity === 'fatal') {
           throw crawlerError;
         }
       })
       .finally(() => {
-        activeCount -= 1;
-        processedPages += 1;
-        activePromises.delete(task);
+        this.activeCount -= 1;
+        this.processedPages += 1;
+        this.activePromises.delete(task);
 
-        if (!cancelled) {
-          runQueue();
+        if (!this.cancelled) {
+          this.runQueue();
         }
       });
 
-    activePromises.add(task);
-  };
+    this.activePromises.add(task);
+  }
 
-  const runQueue = (): void => {
-    while (!cancelled && queue.length > 0) {
-      if (options.maxPages && processedPages + activeCount >= options.maxPages) {
-        break;
-      }
-
-      const next = dequeue();
-      if (!next) {
-        break;
-      }
-
-      schedule(next);
-    }
-  };
-
-  const logFailureEvent = (item: CrawlQueueItem, page: PageResult, reason: string): void => {
-    const event = createFailureEvent(item, page, reason);
-    stats.failureLog.push(event);
-    const entries = failureLogIndex.get(page.url) ?? [];
-    entries.push(stats.failureLog.length - 1);
-    failureLogIndex.set(page.url, entries);
-  };
-
-  const markFailureResolved = (url: string): void => {
-    const entries = failureLogIndex.get(url);
-    if (!entries || entries.length === 0) {
-      return;
-    }
-
-    const lastIndex = entries.pop();
-    if (lastIndex === undefined) {
-      return;
-    }
-
-    stats.failureLog[lastIndex] = {
-      ...stats.failureLog[lastIndex],
-      resolvedOnRetry: true,
-    };
-
-    if (entries.length === 0) {
-      failureLogIndex.delete(url);
-    } else {
-      failureLogIndex.set(url, entries);
-    }
-  };
-
-  const handleItem = async (item: CrawlQueueItem): Promise<void> => {
-    const fetchResult = await fetchPage(item.url, {
-      timeoutMs: options.timeoutMs,
-      maxRetries: DEFAULT_MAX_RETRIES,
-    });
-
-    const pageBase = new URL(fetchResult.url);
+  private async handleItem(item: CrawlQueueItem): Promise<void> {
+    const outcome = await fetchPageWithRetry(item.url, this.options.timeoutMs);
+    const pageBase = new URL(outcome.url);
     const normalizedVisited = normalizeOrFallback(pageBase);
-    seen.add(normalizedVisited);
+    this.queue.markVisited(normalizedVisited);
 
     const pageResult: PageResult = {
       url: normalizedVisited,
       depth: item.depth,
-      status: fetchResult.status ?? undefined,
-      contentType: fetchResult.contentType,
+      status: outcome.status ?? undefined,
+      contentType: outcome.contentType,
       links: [],
     };
-    // When dedupe-by-hash lands, we would compare the fetched body hash here and skip duplicates if requested.
-    // Hash computation for identical content elimination would occur here prior to parsing links.
 
-    if (!fetchResult.ok) {
-      if (fetchResult.error) {
-        reportCrawlerError(fetchResult.error, {
-          stage: 'fetch',
-          url: pageResult.url,
-          depth: item.depth,
-          attempt: item.attempt,
-        }, { throwOnFatal: false });
-        pageResult.error = fetchResult.error.message;
-      } else if (fetchResult.status) {
-        pageResult.error = `HTTP ${fetchResult.status}`;
-      } else {
-        pageResult.error = 'Request failed';
-      }
-    }
-
-    const failureReason = determineFailureReason(fetchResult, pageResult);
-
-    if (fetchResult.ok && item.attempt > 0) {
-      stats.retrySuccesses += 1;
-      markFailureResolved(pageResult.url);
-    }
-
-    if (!fetchResult.ok) {
-      const reason = failureReason ?? 'Unknown failure';
-      logFailureEvent(item, pageResult, reason);
-
-      if (item.attempt < MAX_ADDITIONAL_ATTEMPTS) {
-        stats.retryAttempts += 1;
-        logError(
-          `[retry] attempt ${item.attempt + 1} failed for ${pageResult.url}: ${reason}. Scheduling retry.`,
-        );
-        enqueue({ url: pageResult.url, depth: item.depth, attempt: item.attempt + 1 });
-      } else {
-        stats.retryFailures += 1;
-        logError(
-          `[retry] attempt ${item.attempt + 1} failed for ${pageResult.url}: ${reason}. No retries left.`,
-        );
-      }
-    }
-
-    if (!fetchResult.html) {
-      recordPageMetrics(pageResult, fetchResult.ok, fetchResult.status, failureReason);
-      emitQuietProgress();
-      handlers.onPage(pageResult);
+    if (!outcome.ok) {
+      this.handleFailedOutcome(item, pageResult, outcome.failureReason, outcome.error, outcome.status);
       return;
     }
 
-    let rawLinks: string[];
-    try {
-      rawLinks = parseLinks(fetchResult.html);
-    } catch (error) {
-      const crawlerError = reportCrawlerError(error, {
-        stage: 'parse',
-        url: pageResult.url,
-        depth: item.depth,
-      }, { throwOnFatal: false });
-      pageResult.error = crawlerError.message;
-      fetchResult.html = undefined;
-      logFailureEvent(item, pageResult, crawlerError.message);
-      recordPageMetrics(pageResult, false, fetchResult.status, crawlerError.message);
-      emitQuietProgress();
-      handlers.onPage(pageResult);
+    if (item.attempt > 0) {
+      this.stats.retrySuccesses += 1;
+      this.failures.resolve(pageResult.url);
+    }
+
+    if (!outcome.html) {
+      recordPageMetrics(this.stats, pageResult, true, outcome.status, undefined);
+      this.dispatchPage(pageResult);
       return;
     }
-    fetchResult.html = undefined;
-    const normalizedLinks = new Set<string>();
 
-    for (const rawLink of rawLinks) {
-      const normalized = normalizeUrl(rawLink, pageBase);
+    const parseResult = parseAndEnqueue({
+      html: outcome.html,
+      baseUrl: pageBase,
+      normalizedVisited,
+      depth: item.depth,
+      queue: this.queue,
+      stats: this.stats,
+    });
 
-      if (!normalized) {
-        continue;
-      }
-
-      if (!sameSubdomain(normalizedVisited, normalized)) {
-        continue;
-      }
-
-      normalizedLinks.add(normalized);
-
-      if (fetchResult.ok) {
-        if (!seen.has(normalized)) {
-          enqueue({ url: normalized, depth: item.depth + 1, attempt: 0 });
-        } else {
-          stats.duplicatesFiltered += 1;
-        }
-      }
+    if (parseResult.error) {
+      this.handleParseFailure(item, pageResult, parseResult.error.message, outcome.status);
+      return;
     }
 
-    pageResult.links = [...normalizedLinks];
-    recordPageMetrics(pageResult, fetchResult.ok, fetchResult.status, failureReason);
-    emitQuietProgress();
-    handlers.onPage(pageResult);
-  };
+    pageResult.links = parseResult.links;
+    recordPageMetrics(this.stats, pageResult, true, outcome.status, undefined);
+    this.dispatchPage(pageResult);
+  }
 
-  const normalizeOrFallback = (raw: URL): string => {
-    const normalized = normalizeUrl(raw.href, raw);
-    // Tracking-parameter cleanup would reappear here once the option is supported again.
-
-    return normalized ?? raw.href;
-  };
-
-  const recordPageMetrics = (
-    page: PageResult,
-    ok: boolean,
-    status: number | null,
+  private handleFailedOutcome(
+    item: CrawlQueueItem,
+    pageResult: PageResult,
     failureReason: string | undefined,
-  ): void => {
-    stats.pagesVisited += 1;
-    stats.maxDepth = Math.max(stats.maxDepth, page.depth);
-    stats.totalLinksExtracted += page.links.length;
+    error: Error | undefined,
+    status: number | null,
+  ): void {
+    const reason = failureReason ?? 'Request failed';
+    pageResult.error = reason;
 
-    if (ok) {
-      stats.pagesSucceeded += 1;
-    } else {
-      stats.pagesFailed += 1;
-      if (failureReason) {
-        const current = stats.failureReasons.get(failureReason) ?? 0;
-        stats.failureReasons.set(failureReason, current + 1);
-      }
+    if (error) {
+      reportCrawlerError(
+        error,
+        { stage: 'fetch', url: pageResult.url, depth: item.depth, attempt: item.attempt },
+        { throwOnFatal: false },
+      );
     }
 
-    if (typeof status === 'number') {
-      const current = stats.statusCounts.get(status) ?? 0;
-      stats.statusCounts.set(status, current + 1);
-    }
-  };
+    recordFailure({
+      item,
+      page: pageResult,
+      reason,
+      stats: this.stats,
+      failures: this.failures,
+      enqueueRetry: this.enqueueRetry,
+      allowRetry: true,
+      maxAdditionalAttempts: MAX_ADDITIONAL_ATTEMPTS,
+    });
 
-  const determineFailureReason = (
-    fetchResult: FetchPageResult,
-    page: PageResult,
-  ): string | undefined => {
-    if (fetchResult.ok) {
-      return undefined;
-    }
+    recordPageMetrics(this.stats, pageResult, false, status, reason);
+    this.dispatchPage(pageResult);
+  }
 
-    const error = fetchResult.error;
-    if (error instanceof Error) {
-      if (error.name === 'AbortError' && error.message) {
-        return error.message;
-      }
+  private handleParseFailure(
+    item: CrawlQueueItem,
+    pageResult: PageResult,
+    reason: string,
+    status: number | null,
+  ): void {
+    pageResult.error = reason;
 
-      if (error.name && error.name !== 'Error') {
-        return error.name;
-      }
+    recordFailure({
+      item,
+      page: pageResult,
+      reason,
+      stats: this.stats,
+      failures: this.failures,
+      enqueueRetry: this.enqueueRetry,
+      allowRetry: false,
+      maxAdditionalAttempts: MAX_ADDITIONAL_ATTEMPTS,
+    });
 
-      if (error.message) {
-        return error.message;
-      }
-    }
+    recordPageMetrics(this.stats, pageResult, false, status, reason);
+    this.dispatchPage(pageResult);
+  }
 
-    if (typeof fetchResult.status === 'number') {
-      return `HTTP ${fetchResult.status}`;
-    }
-
-    return page.error ?? 'Unknown failure';
-  };
-
-  const emitSummary = (): void => {
-    const summary: CrawlSummary = {
-      pagesVisited: stats.pagesVisited,
-      pagesSucceeded: stats.pagesSucceeded,
-      pagesFailed: stats.pagesFailed,
-      uniqueUrlsDiscovered: seen.size,
-      maxDepth: stats.maxDepth,
-      totalLinksExtracted: stats.totalLinksExtracted,
-      statusCounts: Object.fromEntries(
-        [...stats.statusCounts.entries()].map(([status, count]) => [String(status), count]),
-      ),
-      failureReasons: Object.fromEntries(stats.failureReasons.entries()),
-      durationMs: Date.now() - startTime,
-      actualMaxConcurrency: stats.actualMaxConcurrency,
-      peakQueueSize: stats.peakQueueSize,
-      duplicatesFiltered: stats.duplicatesFiltered,
-      meanLinksPerPage:
-        stats.pagesVisited === 0
-          ? 0
-          : Number((stats.totalLinksExtracted / stats.pagesVisited).toFixed(2)),
-      cancelled,
-      retryAttempts: stats.retryAttempts,
-      retrySuccesses: stats.retrySuccesses,
-      retryFailures: stats.retryFailures,
-      failureLog: stats.failureLog,
-    };
-
-    if (handlers.onComplete) {
-      handlers.onComplete(summary);
-      return;
-    }
-
-    writeSummary(summary, options.format);
-  };
-
-  try {
-    runQueue();
-    while (activePromises.size > 0) {
-      await Promise.allSettled([...activePromises]);
-    }
-    emitSummary();
-  } finally {
-    flushOutputBuffers();
-    resetOutputConfig();
-    finalize();
+  private dispatchPage(pageResult: PageResult): void {
+    this.progress.emit();
+    this.handlers.onPage(pageResult);
   }
 }
 
-function createFailureEvent(
-  item: CrawlQueueItem,
-  page: PageResult,
-  reason: string,
-): FailureEvent {
-  return {
-    url: page.url,
-    depth: item.depth,
-    reason,
-    attempt: item.attempt + 1,
-    resolvedOnRetry: false,
+export async function crawl({ normalizedStart, options, handlers }: CrawlRuntimeOptions): Promise<void> {
+  const effectiveHandlers: CrawlHandlers = {
+    ...createDefaultHandlers(options.format),
+    ...(handlers ?? {}),
   };
+
+  setOutputConfig({ quiet: options.quiet, outputFile: options.outputFile, format: options.format });
+  const engine = new CrawlerEngine(normalizedStart, options, effectiveHandlers);
+
+  try {
+    const summary = await engine.run();
+
+    if (effectiveHandlers.onComplete) {
+      effectiveHandlers.onComplete(summary);
+    } else {
+      writeSummary(summary, options.format);
+    }
+  } finally {
+    flushOutputBuffers();
+    resetOutputConfig();
+  }
 }

@@ -21,7 +21,7 @@
     "cheerio": "1.1.2",
     "commander": "14.0.2",
     "p-limit": "7.2.0",
-    "pino": "^10.1.0"
+    "pino": "10.1.0"
   },
   "devDependencies": {
     "@types/node": "22.12.0",

@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 
-import { normalizeUrl } from '../src/crawler/normalizeUrl.js';
+import { normalizeUrl } from '../src/crawler/url/normalizeUrl.js';
 
 describe('normalizeUrl', () => {
   const base = new URL('https://Example.COM/foo/bar');

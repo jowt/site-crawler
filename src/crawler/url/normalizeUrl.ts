@@ -2,6 +2,7 @@ const DEFAULT_PORT_MAP: Record<string, string> = {
   'http:': '80',
   'https:': '443',
 };
+
 export function normalizeUrl(raw: string, base: URL): string | null {
   try {
     const url = new URL(raw, base);

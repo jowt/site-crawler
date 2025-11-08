@@ -1,6 +1,6 @@
 import { crawl } from './crawler/crawl.js';
-import { normalizeUrl } from './crawler/normalizeUrl.js';
-import { resolveCrawlDelayMs } from './crawler/robots.js';
+import { normalizeUrl } from './crawler/url/normalizeUrl.js';
+import { resolveCrawlDelayMs } from './crawler/network/robots.js';
 import { configureLogger } from './logger.js';
 import { createConfigurationError } from './errors.js';
 import {
@@ -12,7 +12,7 @@ import {
 
 const DEFAULT_OPTIONS: CrawlOptions = {
   concurrency: 8,
-  timeoutMs: 10_000,
+  timeoutMs: 2_000,
   format: 'text',
   stripTracking: false, // Reserved for future tracking-parameter stripping support.
   priority: 'none', // Reserved for future queue prioritisation modes.

@@ -1,5 +1,3 @@
-import { CrawlerError } from './errors.js';
-
 export type OutputFormat = 'text' | 'json';
 
 export type PriorityMode = 'none'; // Future queue strategies (e.g. 'shallow') would extend this union.
@@ -72,13 +70,4 @@ export interface CrawlHandlers {
 
 export interface CrawlOrchestratorConfig extends CrawlOrchestratorOptions {
   handlers?: CrawlHandlers;
-}
-
-export interface FetchPageResult {
-  url: string;
-  status: number | null;
-  ok: boolean;
-  html?: string;
-  contentType?: string;
-  error?: CrawlerError;
 }
