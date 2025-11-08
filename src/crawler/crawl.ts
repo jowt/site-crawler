@@ -9,7 +9,17 @@ import {
   FetchPageResult,
   PageResult,
 } from '../types.js';
-import { flushOutputBuffers, logError, writePage, writeSummary } from '../util/output.js';
+import {
+  flushOutputBuffers,
+  logError,
+  resetOutputConfig,
+  setOutputConfig,
+  updateQuietProgress,
+  writePage,
+  writeSummary,
+} from '../util/output.js';
+import { reportCrawlerError } from '../util/errorHandler.js';
+import { ensureCrawlerError } from '../errors.js';
 import { sameSubdomain } from '../util/sameSubdomain.js';
 import { fetchPage } from './fetchPage.js';
 import { normalizeUrl } from './normalizeUrl.js';
@@ -48,9 +58,11 @@ export async function crawl({
     onPage: (result: PageResult) => writePage(result, options.format),
   },
 }: CrawlRuntimeOptions): Promise<void> {
+  setOutputConfig({ quiet: options.quiet, outputFile: options.outputFile, format: options.format });
   const queue: CrawlQueueItem[] = [{ url: normalizedStart, depth: 0, attempt: 0 }];
   const seen = new Set<string>([normalizedStart]);
   // A future hash-based dedupe map keyed by content signature would companion the URL set above.
+  // When --dedupe-by-hash becomes active, we will compute page body hashes and skip repeats here.
 
   let processedPages = 0;
   let activeCount = 0;
@@ -79,6 +91,19 @@ export async function crawl({
   // Additional per-host limiters would live alongside this when honoring robots.txt crawl delays.
   const activePromises = new Set<Promise<void>>();
   const failureLogIndex = new Map<string, number[]>();
+
+  const emitQuietProgress = (): void => {
+    updateQuietProgress({
+      pagesVisited: stats.pagesVisited,
+      pagesSucceeded: stats.pagesSucceeded,
+      pagesFailed: stats.pagesFailed,
+      uniqueUrlsDiscovered: seen.size,
+      totalLinksExtracted: stats.totalLinksExtracted,
+      retryAttempts: stats.retryAttempts,
+      retrySuccesses: stats.retrySuccesses,
+      retryFailures: stats.retryFailures,
+    });
+  };
 
   const sigintHandler = (): void => {
     cancelled = true;
@@ -125,11 +150,27 @@ export async function crawl({
       }
     })
       .catch((error: unknown) => {
+        const crawlerError = ensureCrawlerError(error, {
+          kind: 'internal',
+          severity: 'fatal',
+          details: { url: item.url, depth: item.depth },
+        });
+
+        reportCrawlerError(
+          crawlerError,
+          { stage: 'crawl', url: item.url, depth: item.depth },
+          { throwOnFatal: false },
+        );
+
         if (handlers.onError) {
-          handlers.onError(error instanceof Error ? error : new Error(String(error)), {
+          handlers.onError(crawlerError, {
             url: item.url,
             depth: item.depth,
           });
+        }
+
+        if (crawlerError.severity === 'fatal') {
+          throw crawlerError;
         }
       })
       .finally(() => {
@@ -209,9 +250,16 @@ export async function crawl({
       links: [],
     };
     // When dedupe-by-hash lands, we would compare the fetched body hash here and skip duplicates if requested.
+    // Hash computation for identical content elimination would occur here prior to parsing links.
 
     if (!fetchResult.ok) {
       if (fetchResult.error) {
+        reportCrawlerError(fetchResult.error, {
+          stage: 'fetch',
+          url: pageResult.url,
+          depth: item.depth,
+          attempt: item.attempt,
+        }, { throwOnFatal: false });
         pageResult.error = fetchResult.error.message;
       } else if (fetchResult.status) {
         pageResult.error = `HTTP ${fetchResult.status}`;
@@ -247,12 +295,29 @@ export async function crawl({
 
     if (!fetchResult.html) {
       recordPageMetrics(pageResult, fetchResult.ok, fetchResult.status, failureReason);
+      emitQuietProgress();
       handlers.onPage(pageResult);
       return;
     }
 
-  const rawLinks = parseLinks(fetchResult.html);
-  fetchResult.html = undefined;
+    let rawLinks: string[];
+    try {
+      rawLinks = parseLinks(fetchResult.html);
+    } catch (error) {
+      const crawlerError = reportCrawlerError(error, {
+        stage: 'parse',
+        url: pageResult.url,
+        depth: item.depth,
+      }, { throwOnFatal: false });
+      pageResult.error = crawlerError.message;
+      fetchResult.html = undefined;
+      logFailureEvent(item, pageResult, crawlerError.message);
+      recordPageMetrics(pageResult, false, fetchResult.status, crawlerError.message);
+      emitQuietProgress();
+      handlers.onPage(pageResult);
+      return;
+    }
+    fetchResult.html = undefined;
     const normalizedLinks = new Set<string>();
 
     for (const rawLink of rawLinks) {
@@ -279,6 +344,7 @@ export async function crawl({
 
     pageResult.links = [...normalizedLinks];
     recordPageMetrics(pageResult, fetchResult.ok, fetchResult.status, failureReason);
+    emitQuietProgress();
     handlers.onPage(pageResult);
   };
 
@@ -386,8 +452,9 @@ export async function crawl({
       await Promise.allSettled([...activePromises]);
     }
     emitSummary();
-    flushOutputBuffers();
   } finally {
+    flushOutputBuffers();
+    resetOutputConfig();
     finalize();
   }
 }

@@ -9,7 +9,8 @@ Build a simple, production-ready web crawler that, given a starting URL, visits 
 - **Crawl loop** – A BFS-oriented queue feeds a `p-limit` promise pool. Each completed fetch pushes new links back into the queue while respecting the `--priority` mode (`none` = FIFO, `shallow` = depth priority).
 - **Networking** – Native `fetch` (Node 22) with `AbortController` enforces per-request timeouts. A lightweight retry (one attempt) handles transient network glitches.
 - **Normalization** – `normalizeUrl` lowercases scheme/host, resolves relatives, strips fragments and default ports, normalizes trailing slashes, and optionally removes known tracking params.
-- **Output** – Streaming formatter writes per-page results immediately in text or NDJSON (`--format json`).
+- **Logging** – Structured JSON logs via [Pino](https://getpino.io) capture per-page visits, quiet-mode progress, retries, and the final summary for downstream aggregation (disabled by default unless `--log-level` is set).
+- **Error handling** – Custom crawler error types classify fetch, parse, configuration, and internal failures; recoverable issues are logged and recorded, while fatal conditions short-circuit the crawl.
 - **Subdomain guard** – `sameSubdomain` enforces hostname equality (case-insensitive) so the crawl never leaves the originating subdomain.
 
 ## Why These Choices
@@ -22,8 +23,9 @@ Build a simple, production-ready web crawler that, given a starting URL, visits 
 ## CLI Usage
 
 ```bash
-npm run dev -- crawl https://crawlme.monzo.com --concurrency 8 --format text
-npm run dev -- crawl https://crawlme.monzo.com --format json --strip-tracking > crawl.ndjson
+npm run dev -- crawl https://crawlme.monzo.com --concurrency 8
+npm run dev -- crawl https://crawlme.monzo.com --format json --log-level info
+npm run dev -- crawl https://crawlme.monzo.com --quiet --strip-tracking
 ```
 
 ### Options
@@ -33,7 +35,10 @@ npm run dev -- crawl https://crawlme.monzo.com --format json --strip-tracking > 
 | `--concurrency <n>` | Max concurrent requests (default: 8) |
 | `--max-pages <n>` | Optional cap on pages visited |
 | `--timeout-ms <n>` | Per-request timeout in milliseconds (default: 10000) |
-| `--format <text|json>` | Output mode (default: text) |
+| `--quiet` | Suppress per-page text output; emit throttled progress summaries instead |
+| `--log-level <level>` | Adjust Pino log verbosity (`trace`, `debug`, `info`, `warn`, `error`, `fatal`, `silent` default) |
+| `--format <text\|json>` | Choose text (default) or newline-delimited JSON output |
+| `--output-file <path>` | Placeholder for file-based logging (currently ignored) |
 | `--strip-tracking` | Remove `utm_*`, `gclid`, `fbclid` params |
 | `--priority <none|shallow>` | FIFO (default) or depth-first bias |
 
@@ -73,4 +78,4 @@ The image default entrypoint runs the `crawl` command; pass CLI flags after the 
 - No adaptive throttling/backoff beyond a single retry for transient errors.
 - No persistence layer for very large crawls (everything is in-memory).
 - No graph export or sitemap output yet (possible additions: DOT exports, XML sitemaps).
-- Future enhancements could include per-host semaphore pools, structured logging (pino), and checkpoint/resume abilities for long crawls.
+- Future enhancements could include per-host semaphore pools and checkpoint/resume abilities for long crawls.

@@ -1,4 +1,6 @@
-export type OutputFormat = 'text'; // Alternate formats (e.g. 'json') will plug in later.
+import { CrawlerError } from './errors.js';
+
+export type OutputFormat = 'text' | 'json';
 
 export type PriorityMode = 'none'; // Future queue strategies (e.g. 'shallow') would extend this union.
 
@@ -19,6 +21,9 @@ export interface CrawlOptions {
   priority: PriorityMode;
   crawlDelayMs: number;
   dedupeByHash: boolean;
+  quiet: boolean;
+  outputFile?: string;
+  logLevel: string;
 }
 
 export interface PageResult {
@@ -75,5 +80,5 @@ export interface FetchPageResult {
   ok: boolean;
   html?: string;
   contentType?: string;
-  error?: Error;
+  error?: CrawlerError;
 }

@@ -1,6 +1,8 @@
 import { crawl } from './crawler/crawl.js';
 import { normalizeUrl } from './crawler/normalizeUrl.js';
 import { resolveCrawlDelayMs } from './crawler/robots.js';
+import { configureLogger } from './logger.js';
+import { createConfigurationError } from './errors.js';
 import {
   CrawlOptions,
   CrawlOrchestratorConfig,
@@ -16,9 +18,13 @@ const DEFAULT_OPTIONS: CrawlOptions = {
   priority: 'none', // Reserved for future queue prioritisation modes.
   crawlDelayMs: 0,
   dedupeByHash: false, // Reserved for future content-hash de-duplication.
+  quiet: false,
+  outputFile: undefined,
+  logLevel: 'silent',
 };
 
 const VALID_PRIORITIES: PriorityMode[] = ['none']; // Additional modes reserved for future implementations.
+const VALID_FORMATS: OutputFormat[] = ['text', 'json'];
 
 export async function crawlOrchestrator(
   startUrl: string,
@@ -26,6 +32,8 @@ export async function crawlOrchestrator(
 ): Promise<void> {
   const url = validateStartUrl(startUrl);
   const options = resolveOptions(config);
+
+  configureLogger({ level: options.logLevel });
 
   if (config.crawlDelayMs === undefined) {
     const robotsDelay = await resolveCrawlDelayMs(url, options.timeoutMs);
@@ -38,7 +46,7 @@ export async function crawlOrchestrator(
   // When strip-tracking returns, this is where we would supply that preference.
 
   if (!normalizedStart) {
-    throw new Error('Unable to normalize the starting URL.');
+    throw createConfigurationError('Unable to normalize the starting URL.', { startUrl: url.href });
   }
 
   await crawl({
@@ -54,11 +62,14 @@ function validateStartUrl(startUrl: string): URL {
   try {
     url = new URL(startUrl);
   } catch {
-    throw new Error(`Invalid URL: ${startUrl}`);
+    throw createConfigurationError(`Invalid URL: ${startUrl}`, { startUrl });
   }
 
   if (url.protocol !== 'http:' && url.protocol !== 'https:') {
-    throw new Error('Start URL must use http or https protocol.');
+    throw createConfigurationError('Start URL must use http or https protocol.', {
+      protocol: url.protocol,
+      startUrl,
+    });
   }
 
   return url;
@@ -83,10 +94,18 @@ function resolveOptions(config: CrawlOrchestratorConfig): CrawlOptions {
     options.maxPages = coercePositiveInteger(config.maxPages, 'max-pages');
   }
 
-  options.format = DEFAULT_OPTIONS.format; // Placeholder: in future we would honor config.format here.
+  const requestedFormat = config.format ?? DEFAULT_OPTIONS.format;
+  if (!VALID_FORMATS.includes(requestedFormat)) {
+    throw createConfigurationError(`Unsupported format: ${requestedFormat}`, {
+      format: requestedFormat,
+    });
+  }
+  options.format = requestedFormat;
 
   if (config.priority && !VALID_PRIORITIES.includes(config.priority)) {
-    throw new Error(`Unsupported priority mode: ${config.priority}`);
+    throw createConfigurationError(`Unsupported priority mode: ${config.priority}`, {
+      priority: config.priority,
+    });
   }
 
   if (!options.priority) {
@@ -94,7 +113,9 @@ function resolveOptions(config: CrawlOrchestratorConfig): CrawlOptions {
   }
 
   if (!VALID_PRIORITIES.includes(options.priority)) {
-    throw new Error(`Unsupported priority mode: ${options.priority}`);
+    throw createConfigurationError(`Unsupported priority mode: ${options.priority}`, {
+      priority: options.priority,
+    });
   }
 
   options.stripTracking = config.stripTracking ?? DEFAULT_OPTIONS.stripTracking;
@@ -103,13 +124,16 @@ function resolveOptions(config: CrawlOrchestratorConfig): CrawlOptions {
     'crawl-delay',
   );
   options.dedupeByHash = config.dedupeByHash ?? DEFAULT_OPTIONS.dedupeByHash;
+  options.quiet = config.quiet ?? DEFAULT_OPTIONS.quiet;
+  options.outputFile = config.outputFile ?? DEFAULT_OPTIONS.outputFile;
+  options.logLevel = config.logLevel ?? DEFAULT_OPTIONS.logLevel;
 
   return options;
 }
 
 function coercePositiveInteger(value: number, field: string): number {
   if (!Number.isFinite(value) || value <= 0) {
-    throw new Error(`${field} must be a positive integer.`);
+    throw createConfigurationError(`${field} must be a positive integer.`, { value, field });
   }
 
   return Math.trunc(value);
@@ -119,7 +143,7 @@ export type { CrawlOptions, CrawlOrchestratorConfig, OutputFormat, PriorityMode 
 
 function coerceNonNegativeInteger(value: number, field: string): number {
   if (!Number.isFinite(value) || value < 0) {
-    throw new Error(`${field} must be zero or a positive integer.`);
+    throw createConfigurationError(`${field} must be zero or a positive integer.`, { value, field });
   }
 
   return Math.trunc(value);

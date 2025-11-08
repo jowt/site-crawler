@@ -1,3 +1,4 @@
+import { createFetchError, type CrawlerError } from '../errors.js';
 import { FetchPageResult } from '../types.js';
 
 export interface FetchPageOptions {
@@ -9,7 +10,7 @@ const RETRYABLE_ERROR_CODES = new Set(['ECONNRESET', 'ETIMEDOUT', 'EAI_AGAIN']);
 
 export async function fetchPage(url: string, options: FetchPageOptions): Promise<FetchPageResult> {
   const maxAttempts = Math.max(1, (options.maxRetries ?? 1) + 1);
-  let lastError: Error | undefined;
+  let lastError: CrawlerError | undefined;
 
   for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
     const controller = new AbortController();
@@ -32,17 +33,32 @@ export async function fetchPage(url: string, options: FetchPageOptions): Promise
       const isHtml = contentType?.toLowerCase().includes('text/html');
       const html = isHtml ? await response.text() : undefined;
 
+      if (!response.ok) {
+        const error = createFetchError(`Request failed with status ${response.status}`, {
+          url: response.url,
+          status: response.status,
+        });
+
+        return {
+          url: response.url,
+          status: response.status,
+          ok: false,
+          contentType,
+          error,
+        };
+      }
+
       return {
         url: response.url,
         status: response.status,
-        ok: response.ok,
+        ok: true,
         contentType,
         html,
       };
     } catch (error) {
       clearTimeout(timeoutId);
       const err = error instanceof Error ? error : new Error(String(error));
-      lastError = err;
+      lastError = createFetchError(err.message || 'Request failed', { url, attempt }, { cause: err });
 
       if (controller.signal.aborted && err.name === 'AbortError') {
         break;
@@ -55,7 +71,6 @@ export async function fetchPage(url: string, options: FetchPageOptions): Promise
       await delay(100 * attempt);
     }
   }
-
   return {
     url,
     status: null,
