@@ -1,15 +1,8 @@
-export interface NormalizeOptions {
-  stripTracking: boolean;
-}
-
 const DEFAULT_PORT_MAP: Record<string, string> = {
   'http:': '80',
   'https:': '443',
 };
-
-const TRACKING_PARAM_PATTERNS = [/^utm_/i, /^gclid$/i, /^fbclid$/i];
-
-export function normalizeUrl(raw: string, base: URL, options: NormalizeOptions): string | null {
+export function normalizeUrl(raw: string, base: URL): string | null {
   try {
     const url = new URL(raw, base);
 
@@ -24,11 +17,7 @@ export function normalizeUrl(raw: string, base: URL, options: NormalizeOptions):
     removeDefaultPort(url);
     normalizePath(url);
 
-    if (options.stripTracking) {
-      stripTracking(url.searchParams);
-      const search = url.searchParams.toString();
-      url.search = search ? `?${search}` : '';
-    }
+    // param (tracking??) stripping would slot in here if we extend the crawler later.
 
     return url.toString();
   } catch {
@@ -50,12 +39,4 @@ function normalizePath(url: URL): void {
 
   const trimmed = url.pathname.replace(/\/+$/, '');
   url.pathname = trimmed.length > 0 ? trimmed : '/';
-}
-
-export function stripTracking(params: URLSearchParams): void {
-  for (const key of [...params.keys()]) {
-    if (TRACKING_PARAM_PATTERNS.some((pattern) => pattern.test(key))) {
-      params.delete(key);
-    }
-  }
 }

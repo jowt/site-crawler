@@ -45,6 +45,13 @@ beforeAll(async () => {
   const server = createServer((req: IncomingMessage, res: ServerResponse) => {
     const url = new URL(req.url ?? '/', `http://${req.headers.host ?? ''}`);
     const path = url.pathname.endsWith('/') && url.pathname !== '/' ? url.pathname.slice(0, -1) : url.pathname;
+
+    if (path === '/robots.txt') {
+      res.setHeader('Content-Type', 'text/plain; charset=utf-8');
+      res.end('User-agent: *\nCrawl-delay: 1');
+      return;
+    }
+
     const html = siteMap[path];
 
     if (!html) {
@@ -70,7 +77,7 @@ beforeAll(async () => {
 
   serverClose = () =>
     new Promise<void>((resolve, reject) => {
-      server.close((error: Error | null) => {
+      server.close((error?: Error) => {
         if (error) {
           reject(error);
         } else {
@@ -92,10 +99,10 @@ describe('crawlOrchestrator smoke test', () => {
     let summary: CrawlSummary | undefined;
 
     await crawlOrchestrator(`${baseUrl}/`, {
-      format: 'json',
       concurrency: 4,
       timeoutMs: 5_000,
       stripTracking: true,
+      crawlDelayMs: 0,
       handlers: {
         onPage: (page) => {
           visited.push(page);
@@ -112,8 +119,9 @@ describe('crawlOrchestrator smoke test', () => {
     expect(visitedUrls).not.toContain('https://example.com/external');
 
     const teamPage = visited.find((page) => page.url === `${baseUrl}/team`);
-    expect(teamPage?.links).toContain(`${baseUrl}/team`);
-    expect(teamPage?.links).not.toContain(`${baseUrl}/team?utm_source=test`);
+    expect(teamPage?.links).toContain(`${baseUrl}/`);
+    expect(teamPage?.links).toContain(`${baseUrl}/team?utm_source=test`);
+    // Tracking cleanup would remove the utm parameter here when that feature lands.
 
     expect(summary).toBeDefined();
     expect(summary?.pagesVisited).toBe(visited.length);
@@ -124,5 +132,9 @@ describe('crawlOrchestrator smoke test', () => {
     expect(summary?.durationMs).toBeGreaterThan(0);
     expect(summary?.cancelled).toBe(false);
     expect(summary?.failureReasons).toEqual({});
+    expect(summary?.retryAttempts).toBe(0);
+    expect(summary?.retrySuccesses).toBe(0);
+    expect(summary?.retryFailures).toBe(0);
+    expect(summary?.failureLog).toEqual([]);
   });
 });

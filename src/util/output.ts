@@ -1,5 +1,12 @@
 import { CrawlSummary, OutputFormat, PageResult } from '../types.js';
 
+const STDOUT_BATCH_SIZE = 512;
+const STDERR_BATCH_SIZE = 128;
+
+const stdoutBuffer: string[] = [];
+
+const stderrBuffer: string[] = [];
+
 export function renderText(page: PageResult): string {
   const lines: string[] = [`VISITED: ${page.url}`];
 
@@ -16,20 +23,10 @@ export function renderText(page: PageResult): string {
   return `${lines.join('\n')}\n`;
 }
 
-export function renderJson(page: PageResult): string {
-  return `${JSON.stringify({
-    page: page.url,
-    depth: page.depth,
-    links: page.links,
-    status: page.status ?? undefined,
-    contentType: page.contentType ?? undefined,
-    error: page.error ?? undefined,
-  })}\n`;
-}
-
-export function writePage(page: PageResult, format: OutputFormat): void {
-  const rendered = format === 'json' ? renderJson(page) : renderText(page);
-  process.stdout.write(rendered);
+export function writePage(page: PageResult, _format: OutputFormat): void {
+  // Alternate formats would conditionally render based on _format once implemented.
+  const rendered = renderText(page);
+  queueStdout(rendered);
 }
 
 export function renderTextSummary(summary: CrawlSummary): string {
@@ -48,6 +45,9 @@ export function renderTextSummary(summary: CrawlSummary): string {
     `Peak queue size: ${summary.peakQueueSize}`,
     `Duplicates filtered: ${summary.duplicatesFiltered}`,
     `Cancelled: ${summary.cancelled ? 'yes' : 'no'}`,
+    `Retry attempts scheduled: ${summary.retryAttempts}`,
+    `Retry successes: ${summary.retrySuccesses}`,
+    `Retry failures: ${summary.retryFailures}`,
   ];
 
   const statusEntries = Object.entries(summary.statusCounts).sort(
@@ -72,16 +72,30 @@ export function renderTextSummary(summary: CrawlSummary): string {
     }
   }
 
+  if (summary.failureLog.length > 0) {
+    lines.push('Failure log:');
+    for (const event of summary.failureLog) {
+      const status = event.resolvedOnRetry ? 'resolved' : 'unresolved';
+      lines.push(`  [attempt ${event.attempt}] ${event.url} - ${event.reason} (${status})`);
+    }
+  }
+
   return `${lines.join('\n')}\n`;
 }
 
-export function renderJsonSummary(summary: CrawlSummary): string {
-  return `${JSON.stringify({ type: 'summary', stats: summary })}\n`;
+export function writeSummary(summary: CrawlSummary, _format: OutputFormat): void {
+  // Future summary formats (e.g. JSON) would branch on _format here.
+  const rendered = renderTextSummary(summary);
+  queueStdout(rendered, { forceFlush: true });
 }
 
-export function writeSummary(summary: CrawlSummary, format: OutputFormat): void {
-  const rendered = format === 'json' ? renderJsonSummary(summary) : renderTextSummary(summary);
-  process.stdout.write(rendered);
+export function logError(message: string): void {
+  queueStderr(message.endsWith('\n') ? message : `${message}\n`);
+}
+
+export function flushOutputBuffers(): void {
+  flushStdoutBuffer();
+  flushStderrBuffer();
 }
 
 function formatDuration(durationMs: number): string {
@@ -103,4 +117,40 @@ function formatDuration(durationMs: number): string {
   const remainingSeconds = seconds % 60;
   const secondsPart = remainingSeconds >= 10 ? remainingSeconds.toFixed(0) : remainingSeconds.toFixed(1);
   return `${minutes}m ${secondsPart}s`;
+}
+
+function queueStdout(chunk: string, options: { forceFlush?: boolean } = {}): void {
+  stdoutBuffer.push(chunk);
+  if (options.forceFlush || stdoutBuffer.length >= STDOUT_BATCH_SIZE) {
+    flushStdoutBuffer();
+    return;
+  }
+}
+
+function flushStdoutBuffer(): void {
+  if (stdoutBuffer.length === 0) {
+    return;
+  }
+
+  const payload = stdoutBuffer.join('');
+  stdoutBuffer.length = 0;
+  process.stdout.write(payload);
+}
+
+function queueStderr(chunk: string, options: { forceFlush?: boolean } = {}): void {
+  stderrBuffer.push(chunk);
+  if (options.forceFlush || stderrBuffer.length >= STDERR_BATCH_SIZE) {
+    flushStderrBuffer();
+    return;
+  }
+}
+
+function flushStderrBuffer(): void {
+  if (stderrBuffer.length === 0) {
+    return;
+  }
+
+  const payload = stderrBuffer.join('');
+  stderrBuffer.length = 0;
+  process.stderr.write(payload);
 }

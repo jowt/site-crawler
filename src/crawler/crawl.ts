@@ -5,10 +5,11 @@ import {
   CrawlOptions,
   CrawlQueueItem,
   CrawlSummary,
+  FailureEvent,
   FetchPageResult,
   PageResult,
 } from '../types.js';
-import { writePage, writeSummary } from '../util/output.js';
+import { flushOutputBuffers, logError, writePage, writeSummary } from '../util/output.js';
 import { sameSubdomain } from '../util/sameSubdomain.js';
 import { fetchPage } from './fetchPage.js';
 import { normalizeUrl } from './normalizeUrl.js';
@@ -31,9 +32,14 @@ interface CrawlStats {
   peakQueueSize: number;
   duplicatesFiltered: number;
   failureReasons: Map<string, number>;
+  retryAttempts: number;
+  retrySuccesses: number;
+  retryFailures: number;
+  failureLog: FailureEvent[];
 }
 
 const DEFAULT_MAX_RETRIES = 1;
+const MAX_ADDITIONAL_ATTEMPTS = 1;
 
 export async function crawl({
   normalizedStart,
@@ -42,8 +48,9 @@ export async function crawl({
     onPage: (result: PageResult) => writePage(result, options.format),
   },
 }: CrawlRuntimeOptions): Promise<void> {
-  const queue: CrawlQueueItem[] = [{ url: normalizedStart, depth: 0 }];
+  const queue: CrawlQueueItem[] = [{ url: normalizedStart, depth: 0, attempt: 0 }];
   const seen = new Set<string>([normalizedStart]);
+  // A future hash-based dedupe map keyed by content signature would companion the URL set above.
 
   let processedPages = 0;
   let activeCount = 0;
@@ -62,10 +69,16 @@ export async function crawl({
     peakQueueSize: queue.length,
     duplicatesFiltered: 0,
     failureReasons: new Map<string, number>(),
+    retryAttempts: 0,
+    retrySuccesses: 0,
+    retryFailures: 0,
+    failureLog: [],
   };
 
   const limiter = pLimit(options.concurrency);
+  // Additional per-host limiters would live alongside this when honoring robots.txt crawl delays.
   const activePromises = new Set<Promise<void>>();
+  const failureLogIndex = new Map<string, number[]>();
 
   const sigintHandler = (): void => {
     cancelled = true;
@@ -86,9 +99,7 @@ export async function crawl({
     seen.add(item.url);
     stats.peakQueueSize = Math.max(stats.peakQueueSize, queue.length);
 
-    if (options.priority === 'shallow') {
-      queue.sort((a, b) => a.depth - b.depth);
-    }
+    // Alternate queue priorities (e.g. shallow-first) would reorder the queue here.
   };
 
   const dequeue = (): CrawlQueueItem | undefined => {
@@ -96,9 +107,7 @@ export async function crawl({
       return undefined;
     }
 
-    if (options.priority === 'shallow') {
-      queue.sort((a, b) => a.depth - b.depth);
-    }
+    // Future priority modes could select the next item differently at this point.
 
     return queue.shift();
   };
@@ -151,6 +160,37 @@ export async function crawl({
     }
   };
 
+  const logFailureEvent = (item: CrawlQueueItem, page: PageResult, reason: string): void => {
+    const event = createFailureEvent(item, page, reason);
+    stats.failureLog.push(event);
+    const entries = failureLogIndex.get(page.url) ?? [];
+    entries.push(stats.failureLog.length - 1);
+    failureLogIndex.set(page.url, entries);
+  };
+
+  const markFailureResolved = (url: string): void => {
+    const entries = failureLogIndex.get(url);
+    if (!entries || entries.length === 0) {
+      return;
+    }
+
+    const lastIndex = entries.pop();
+    if (lastIndex === undefined) {
+      return;
+    }
+
+    stats.failureLog[lastIndex] = {
+      ...stats.failureLog[lastIndex],
+      resolvedOnRetry: true,
+    };
+
+    if (entries.length === 0) {
+      failureLogIndex.delete(url);
+    } else {
+      failureLogIndex.set(url, entries);
+    }
+  };
+
   const handleItem = async (item: CrawlQueueItem): Promise<void> => {
     const fetchResult = await fetchPage(item.url, {
       timeoutMs: options.timeoutMs,
@@ -168,6 +208,7 @@ export async function crawl({
       contentType: fetchResult.contentType,
       links: [],
     };
+    // When dedupe-by-hash lands, we would compare the fetched body hash here and skip duplicates if requested.
 
     if (!fetchResult.ok) {
       if (fetchResult.error) {
@@ -181,19 +222,41 @@ export async function crawl({
 
     const failureReason = determineFailureReason(fetchResult, pageResult);
 
+    if (fetchResult.ok && item.attempt > 0) {
+      stats.retrySuccesses += 1;
+      markFailureResolved(pageResult.url);
+    }
+
+    if (!fetchResult.ok) {
+      const reason = failureReason ?? 'Unknown failure';
+      logFailureEvent(item, pageResult, reason);
+
+      if (item.attempt < MAX_ADDITIONAL_ATTEMPTS) {
+        stats.retryAttempts += 1;
+        logError(
+          `[retry] attempt ${item.attempt + 1} failed for ${pageResult.url}: ${reason}. Scheduling retry.`,
+        );
+        enqueue({ url: pageResult.url, depth: item.depth, attempt: item.attempt + 1 });
+      } else {
+        stats.retryFailures += 1;
+        logError(
+          `[retry] attempt ${item.attempt + 1} failed for ${pageResult.url}: ${reason}. No retries left.`,
+        );
+      }
+    }
+
     if (!fetchResult.html) {
       recordPageMetrics(pageResult, fetchResult.ok, fetchResult.status, failureReason);
       handlers.onPage(pageResult);
       return;
     }
 
-    const rawLinks = parseLinks(fetchResult.html);
+  const rawLinks = parseLinks(fetchResult.html);
+  fetchResult.html = undefined;
     const normalizedLinks = new Set<string>();
 
     for (const rawLink of rawLinks) {
-      const normalized = normalizeUrl(rawLink, pageBase, {
-        stripTracking: options.stripTracking,
-      });
+      const normalized = normalizeUrl(rawLink, pageBase);
 
       if (!normalized) {
         continue;
@@ -207,7 +270,7 @@ export async function crawl({
 
       if (fetchResult.ok) {
         if (!seen.has(normalized)) {
-          enqueue({ url: normalized, depth: item.depth + 1 });
+          enqueue({ url: normalized, depth: item.depth + 1, attempt: 0 });
         } else {
           stats.duplicatesFiltered += 1;
         }
@@ -220,9 +283,8 @@ export async function crawl({
   };
 
   const normalizeOrFallback = (raw: URL): string => {
-    const normalized = normalizeUrl(raw.href, raw, {
-      stripTracking: options.stripTracking,
-    });
+    const normalized = normalizeUrl(raw.href, raw);
+    // Tracking-parameter cleanup would reappear here once the option is supported again.
 
     return normalized ?? raw.href;
   };
@@ -304,6 +366,10 @@ export async function crawl({
           ? 0
           : Number((stats.totalLinksExtracted / stats.pagesVisited).toFixed(2)),
       cancelled,
+      retryAttempts: stats.retryAttempts,
+      retrySuccesses: stats.retrySuccesses,
+      retryFailures: stats.retryFailures,
+      failureLog: stats.failureLog,
     };
 
     if (handlers.onComplete) {
@@ -320,7 +386,22 @@ export async function crawl({
       await Promise.allSettled([...activePromises]);
     }
     emitSummary();
+    flushOutputBuffers();
   } finally {
     finalize();
   }
+}
+
+function createFailureEvent(
+  item: CrawlQueueItem,
+  page: PageResult,
+  reason: string,
+): FailureEvent {
+  return {
+    url: page.url,
+    depth: item.depth,
+    reason,
+    attempt: item.attempt + 1,
+    resolvedOnRetry: false,
+  };
 }

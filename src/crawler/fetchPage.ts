@@ -22,6 +22,7 @@ export async function fetchPage(url: string, options: FetchPageOptions): Promise
         headers: {
           'user-agent': 'monzo-crawler/1.0 (+https://github.com/monzo)',
           accept: 'text/html,application/xhtml+xml,*/*;q=0.9',
+          'accept-encoding': 'gzip, deflate, br', // Allow servers to serve compressed payloads for faster transfers.
         },
       });
 

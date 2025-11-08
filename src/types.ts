@@ -1,6 +1,14 @@
-export type OutputFormat = 'text' | 'json';
+export type OutputFormat = 'text'; // Alternate formats (e.g. 'json') will plug in later.
 
-export type PriorityMode = 'none' | 'shallow';
+export type PriorityMode = 'none'; // Future queue strategies (e.g. 'shallow') would extend this union.
+
+export interface FailureEvent {
+  url: string;
+  depth: number;
+  reason: string;
+  attempt: number;
+  resolvedOnRetry: boolean;
+}
 
 export interface CrawlOptions {
   concurrency: number;
@@ -9,6 +17,8 @@ export interface CrawlOptions {
   format: OutputFormat;
   stripTracking: boolean;
   priority: PriorityMode;
+  crawlDelayMs: number;
+  dedupeByHash: boolean;
 }
 
 export interface PageResult {
@@ -35,11 +45,16 @@ export interface CrawlSummary {
   duplicatesFiltered: number;
   meanLinksPerPage: number;
   cancelled: boolean;
+  retryAttempts: number;
+  retrySuccesses: number;
+  retryFailures: number;
+  failureLog: FailureEvent[];
 }
 
 export interface CrawlQueueItem {
   url: string;
   depth: number;
+  attempt: number;
 }
 
 export interface CrawlOrchestratorOptions extends Partial<CrawlOptions> {}

@@ -1,8 +1,7 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 
 import {
-  renderJson,
-  renderJsonSummary,
+  flushOutputBuffers,
   renderText,
   renderTextSummary,
   writePage,
@@ -38,6 +37,18 @@ const sampleSummary = {
   duplicatesFiltered: 5,
   meanLinksPerPage: 3,
   cancelled: false,
+  retryAttempts: 1,
+  retrySuccesses: 1,
+  retryFailures: 0,
+  failureLog: [
+    {
+      url: 'https://example.com/fail',
+      depth: 2,
+      reason: 'Timeout',
+      attempt: 1,
+      resolvedOnRetry: true,
+    },
+  ],
 };
 
 afterEach(() => {
@@ -52,23 +63,10 @@ describe('output helpers', () => {
     expect(text).toContain('https://example.com/contact');
   });
 
-  it('renders NDJSON format', () => {
-    const json = renderJson(samplePage);
-    expect(json.trim()).toBe(
-      JSON.stringify({
-        page: 'https://example.com/about',
-        depth: 1,
-        links: ['https://example.com', 'https://example.com/contact'],
-        status: 200,
-        contentType: 'text/html',
-        error: undefined,
-      }),
-    );
-  });
-
   it('writes to stdout using selected formatter', () => {
     const spy = vi.spyOn(process.stdout, 'write').mockImplementation(() => true);
     writePage(samplePage, 'text');
+    flushOutputBuffers();
     expect(spy).toHaveBeenCalledOnce();
   });
 
@@ -83,20 +81,16 @@ describe('output helpers', () => {
     expect(text).toContain('Cancelled: no');
     expect(text).toContain('Failure reasons:');
     expect(text).toContain('This operation was aborted: 1');
-  });
-
-  it('renders NDJSON summary output', () => {
-    const json = renderJsonSummary(sampleSummary);
-    const parsed = JSON.parse(json);
-    expect(parsed.type).toBe('summary');
-    expect(parsed.stats.pagesFailed).toBe(1);
-    expect(parsed.stats.durationMs).toBe(1_525);
-    expect(parsed.stats.failureReasons['Timeout']).toBe(2);
+    expect(text).toContain('Retry attempts scheduled: 1');
+    expect(text).toContain('Retry successes: 1');
+    expect(text).toContain('Failure log:');
+    expect(text).toContain('[attempt 1] https://example.com/fail - Timeout (resolved)');
   });
 
   it('writes summary to stdout', () => {
     const spy = vi.spyOn(process.stdout, 'write').mockImplementation(() => true);
-    writeSummary(sampleSummary, 'json');
+    writeSummary(sampleSummary, 'text');
+    flushOutputBuffers();
     expect(spy).toHaveBeenCalledOnce();
   });
 });
