@@ -28,13 +28,13 @@ program
   .option('--max-pages <number>', 'Optional maximum number of pages to visit.')
   .option('--timeout-ms <number>', 'Timeout per request in milliseconds. (default: 10000)')
   .option('--quiet', 'Suppress per-page text output and emit only periodic progress summaries.')
-  .option('--output-file <path>', 'Reserved for future file logging support (currently ignored).')
   .option('--log-level <level>', 'Set log verbosity (pino levels: trace|debug|info|warn|error|fatal).')
   .option(
     '--format <format>',
     'Output format to emit (text or json). Defaults to text.',
   )
   // placeholder flags
+  .option('--output-file <path>', 'Reserved for future file logging support (currently ignored).')
   .option(
     '--crawl-delay-ms <number>',
     'Placeholder for per-host politeness throttling (currently ignored, robots mocked).',
