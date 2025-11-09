@@ -1,5 +1,4 @@
 #!/usr/bin/env node
-import { createRequire } from 'node:module';
 import { Command } from 'commander';
 
 import { crawlOrchestrator } from './index.js';
@@ -7,17 +6,21 @@ import { createConfigurationError } from './errors.js';
 import { CrawlOrchestratorConfig, type OutputFormat } from './types.js';
 import { reportCrawlerError } from './util/errorHandler.js';
 
-const require = createRequire(import.meta.url);
-// eslint-disable-next-line @typescript-eslint/no-var-requires -- package.json access for CLI metadata
-const pkg = require('../package.json') as { version?: string };
-
+async function beginExecution(startUrl: string, options: Record<string, unknown>) {
+    try {
+      const config = buildConfig(options);
+      await crawlOrchestrator(startUrl, config);
+    } catch (error) {
+      reportCliError(error);
+    }
+}
 
 const program = new Command();
 
 program
   .name('monzo-crawler')
   .description('Crawl a single subdomain and report discovered internal links.')
-  .version(pkg.version ?? '0.0.0');
+  .version('0.0.0');
 
 program
   .command('crawl')
@@ -28,34 +31,16 @@ program
   .option('--max-pages <number>', 'Optional maximum number of pages to visit.')
   .option('--timeout-ms <number>', 'Timeout per request in milliseconds. (default: 10000)')
   .option('--quiet', 'Suppress per-page text output and emit only periodic progress summaries.')
-  .option('--log-level <level>', 'Set log verbosity (pino levels: trace|debug|info|warn|error|fatal).')
-  .option(
-    '--format <format>',
-    'Output format to emit (text or json). Defaults to text.',
-  )
   // placeholder flags
-  .option('--output-file <path>', 'Reserved for future file logging support (currently ignored).')
-  .option(
-    '--crawl-delay-ms <number>',
-    'Placeholder for per-host politeness throttling (currently ignored, robots mocked).',
-  )
+  .option('--format <format>', 'Output format to emit (text or json). Defaults to text.')
+  .option('--log-level <level>', 'Placeholder for future log verbosity control (currently ignored).')
+  .option('--output-file <path>', 'Placeholder for file logging support (currently ignored).')
+  .option('--crawl-delay-ms <number>', 'Placeholder for per-host politeness throttling (currently ignored, robots mocked).')
   .option('--strip-tracking', 'Placeholder for removing tracking query parameters from emitted URLs.')
-  .option(
-    '--priority <mode>',
-    'Placeholder for alternate queue strategies; crawler currently runs breadth-first (FIFO) regardless of mode.',
-  )
-  .option(
-    '--dedupe-by-hash',
-    'Placeholder for content-hash deduplication to skip duplicate pages served from different URLs.',
-  )
-  .action(async (startUrl: string, options: Record<string, unknown>) => {
-    try {
-      const config = buildConfig(options);
-      await crawlOrchestrator(startUrl, config);
-    } catch (error) {
-      reportCliError(error);
-    }
-  });
+  .option('--priority <mode>', 'Placeholder for alternate queue strategies; crawler currently runs breadth-first (FIFO) regardless of mode.')
+  .option('--dedupe-by-hash', 'Placeholder for content-hash deduplication to skip duplicate pages served from different URLs.')
+  
+  .action(beginExecution);
 
 await program.parseAsync(process.argv);
 

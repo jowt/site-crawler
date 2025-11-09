@@ -1,4 +1,4 @@
-export type OutputFormat = 'text' | 'json';
+export type OutputFormat = 'text' | 'json'; // 'json' placeholder currently falls back to text output.
 
 export type PriorityMode = 'none'; // Future queue strategies (e.g. 'shallow') would extend this union.
 
@@ -21,7 +21,7 @@ export interface CrawlOptions {
   dedupeByHash: boolean;
   quiet: boolean;
   outputFile?: string;
-  logLevel: string;
+  logLevel: string; // Placeholder: no-op until logging transport grows richer controls.
 }
 
 export interface PageResult {
@@ -60,10 +60,11 @@ export interface CrawlQueueItem {
   attempt: number;
 }
 
-export interface CrawlOrchestratorOptions extends Partial<CrawlOptions> {}
+export type CrawlOrchestratorOptions = Partial<CrawlOptions>;
 
 export interface CrawlHandlers {
   onPage(result: PageResult): void;
+  // these have been implemented for future extension but are not called by consumers yet
   onError?(error: Error, context: { url: string; depth: number }): void;
   onComplete?(summary: CrawlSummary): void;
 }

@@ -1,4 +1,3 @@
-import { getLogger } from '../logger.js';
 import {
   CrawlerError,
   ensureCrawlerError,
@@ -30,28 +29,46 @@ export function reportCrawlerError(
     details: context,
   });
 
-  const logger = getLogger();
   const mergedDetails = {
-    ...context,
     ...(crawlerError.details ?? {}),
-  };
+    ...context,
+  } as Record<string, unknown>;
 
-  const payload = {
-    event: 'error' as const,
-    kind: crawlerError.kind,
-    severity: crawlerError.severity,
-    message: crawlerError.message,
-    details: mergedDetails,
-  };
+  const message = buildLogMessage(crawlerError, mergedDetails);
+  const shouldThrow = options.throwOnFatal ?? true;
 
   if (crawlerError.severity === 'fatal') {
-    logger.error(payload, crawlerError.message);
-    if (options.throwOnFatal ?? true) {
+    console.error(message);
+    if (shouldThrow) {
       throw crawlerError;
     }
   } else {
-    logger.warn(payload, crawlerError.message);
+    console.warn(message);
   }
 
   return crawlerError;
+}
+
+function buildLogMessage(error: CrawlerError, details: Record<string, unknown>): string {
+  const severity = error.severity ?? 'unknown';
+  const parts = [`[${error.kind}/${severity}]`, error.message];
+  const contextSuffix = serialiseDetails(details);
+
+  if (contextSuffix) {
+    parts.push(`(${contextSuffix})`);
+  }
+
+  return parts.join(' ');
+}
+
+function serialiseDetails(details: Record<string, unknown>): string | undefined {
+  const entries = Object.entries(details).filter(([, value]) => value !== undefined);
+  if (entries.length === 0) {
+    return undefined;
+  }
+
+  entries.sort(([a], [b]) => a.localeCompare(b));
+  return entries
+    .map(([key, value]) => `${key}=${JSON.stringify(value)}`)
+    .join(' ');
 }

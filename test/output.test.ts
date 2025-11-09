@@ -1,6 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
-import { getLogger, setLoggerInstance, type LoggerLike } from '../src/logger.js';
 import {
   flushOutputBuffers,
   flushQuietProgress,
@@ -11,28 +10,8 @@ import {
   writeSummary,
 } from '../src/util/output.js';
 
-interface LogEntry {
-  level: string;
-  args: unknown[];
-}
-
-const realLogger = getLogger();
-let logEntries: LogEntry[];
-
 describe('output integration', () => {
   beforeEach(() => {
-    logEntries = [];
-    const testLogger: LoggerLike = {
-      info: (...args: unknown[]) => logEntries.push({ level: 'info', args }),
-      error: (...args: unknown[]) => logEntries.push({ level: 'error', args }),
-      warn: (...args: unknown[]) => logEntries.push({ level: 'warn', args }),
-      debug: (...args: unknown[]) => logEntries.push({ level: 'debug', args }),
-      trace: (...args: unknown[]) => logEntries.push({ level: 'trace', args }),
-      fatal: (...args: unknown[]) => logEntries.push({ level: 'fatal', args }),
-      child: () => testLogger,
-    };
-
-    setLoggerInstance(testLogger);
     setOutputConfig({ quiet: true, outputFile: undefined, format: 'text' });
   });
 
@@ -40,12 +19,12 @@ describe('output integration', () => {
     flushQuietProgress();
     flushOutputBuffers();
     resetOutputConfig();
-    setLoggerInstance(realLogger);
     vi.restoreAllMocks();
   });
 
   it('surfaces failures while keeping quiet progress responsive', () => {
     const stdoutSpy = vi.spyOn(process.stdout, 'write').mockImplementation(() => true);
+    const stderrSpy = vi.spyOn(process.stderr, 'write').mockImplementation(() => true);
 
     logError('crawl failure: https://example.com/fail');
 
@@ -96,10 +75,11 @@ describe('output integration', () => {
 
     flushOutputBuffers();
 
-    expect(logEntries.some((entry) => entry.level === 'error')).toBe(true);
-    expect(logEntries.some((entry) => entry.level === 'info')).toBe(true);
-    expect(stdoutSpy.mock.calls.map((call) => String(call[0])).join('')).toContain(
-      '--- Crawl Summary ---',
-    );
+    const combinedStdout = stdoutSpy.mock.calls.map((call) => String(call[0])).join('');
+    const combinedStderr = stderrSpy.mock.calls.map((call) => String(call[0])).join('');
+
+    expect(combinedStderr).toContain('crawl failure: https://example.com/fail');
+    expect(combinedStdout).toContain('[quiet]');
+    expect(combinedStdout).toContain('--- Crawl Summary ---');
   });
 });

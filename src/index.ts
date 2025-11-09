@@ -1,7 +1,6 @@
 import { crawl } from './crawler/crawl.js';
 import { normalizeUrl } from './crawler/url/normalizeUrl.js';
 import { resolveCrawlDelayMs } from './crawler/network/robots.js';
-import { configureLogger } from './logger.js';
 import { createConfigurationError } from './errors.js';
 import {
   CrawlOptions,
@@ -32,8 +31,6 @@ export async function crawlOrchestrator(
 ): Promise<void> {
   const url = validateStartUrl(startUrl);
   const options = resolveOptions(config);
-
-  configureLogger({ level: options.logLevel });
 
   if (config.crawlDelayMs === undefined) {
     const robotsDelay = await resolveCrawlDelayMs(url, options.timeoutMs);

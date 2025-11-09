@@ -44,7 +44,7 @@ export function parseAndEnqueue(options: {
       }
     }
 
-    return { links: [...normalizedLinks] };
+  return { links: [...normalizedLinks] };
   } catch (error) {
     const crawlerError = reportCrawlerError(
       error,
