@@ -1,12 +1,12 @@
 # Monzo Web Crawler
 
-Single-subdomain crawler built on Node.js 22. It performs a breadth-first crawl using `p-limit` to limit concurrency, emits per-page output (or quiet progress summaries), and ignores links that leave the starting host so the crawl remains on that subdomain.
+Single-subdomain crawler built on Node.js 22. It performs a breadth-first crawl using `p-limit` to limit concurrency, emits per-page output (or quiet progress summaries), and ignores links that leave the starting host/subdomain so the crawl remains on that subdomain.
 
 ## How It Works
 - `src/cli.ts` parses CLI flags and hands configuration to `crawlOrchestrator`.
 - `src/index.ts` normalises the start URL, resolves (mocked) robots crawl-delay, and launches the crawl.
 - `src/crawler/crawl.ts` manages the BFS queue, concurrency control, retries, and stats.
-- `src/crawler/parsing/parseAndEnqueue.ts` extracts links with Cheerio, normalises them, filters to the same subdomain, and enqueues new work.
+- `src/crawler/parsing/parseAndEnqueue.ts` extracts links with Cheerio, normalises them, filters to the same subdomain, and enqueues new work to be queued -> fetched -> parsed.
 - `src/util/output.ts` renders per-page logs or quiet-mode progress plus the final summary.
 
 ## Running the CLI
@@ -21,6 +21,9 @@ npm run dev -- crawl https://crawlme.monzo.com
 
 # Increase concurrency and hide per-page output
 npm run dev -- crawl https://crawlme.monzo.com --concurrency 256 --quiet
+
+# view failure handling with a limited timeout <200ms
+npm run dev -- crawl https://crawlme.monzo.com --concurrency 256 --quiet --timeout-ms 175 
 
 # Target the in-repo demo site (run node scripts/dev-site.mjs first)
 npm run dev -- crawl http://localhost:3001 --max-pages 100
@@ -37,7 +40,7 @@ npm run dev -- crawl http://localhost:3001 --max-pages 100
 ## Placeholders for Future Iteration
 *No-op today, but preserved as were considered or removed from implementation.*
 - `--format json`, `--log-level`, `--output-file` — output hooks that now fall back to text console logging.
-- `--strip-tracking`, `--priority`, `--crawl-delay-ms`, `--dedupe-by-hash` — guardrails for future URL normalisation, prioritised queues, politeness knobs, and content hashing.
+- `--strip-tracking`, `--priority`, `--retries`, `--crawl-delay-ms`, `--dedupe-by-hash` — guardrails for future URL normalisation, prioritised queues, politeness knobs, and content hashing.
 
 ## Development & Verification
 - Build TypeScript to `dist`: `npm run build`
