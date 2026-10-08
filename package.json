@@ -1,10 +1,10 @@
 {
-  "name": "monzo-crawler",
+  "name": "site-crawler",
   "version": "1.0.0",
-  "description": "A single-subdomain web crawler with CLI, concurrency controls, and URL normalization.",
+  "description": "Concurrent, robots.txt-aware single-subdomain web crawler with a CLI, retries and crawl statistics.",
   "type": "module",
   "bin": {
-    "monzo-crawler": "dist/cli.js"
+    "site-crawler": "dist/cli.js"
   },
   "scripts": {
     "dev": "tsx src/cli.ts",

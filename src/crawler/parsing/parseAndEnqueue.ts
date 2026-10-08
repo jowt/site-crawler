@@ -18,8 +18,9 @@ export function parseAndEnqueue(options: {
   depth: number;
   queue: CrawlQueue;
   stats: CrawlStats;
+  isAllowed?: (url: string) => boolean;
 }): ParseResult {
-  const { html, baseUrl, normalizedVisited, depth, queue, stats } = options;
+  const { html, baseUrl, normalizedVisited, depth, queue, stats, isAllowed } = options;
 
   try {
     const rawLinks = parseLinks(html);
@@ -37,6 +38,10 @@ export function parseAndEnqueue(options: {
 
       normalizedLinks.add(normalized);
 
+      if (isAllowed && !isAllowed(normalized)) {
+        continue;
+      }
+
       if (queue.enqueueIfNew(normalized, depth + 1)) {
         stats.peakQueueSize = Math.max(stats.peakQueueSize, queue.pending);
       } else {
@@ -44,7 +49,7 @@ export function parseAndEnqueue(options: {
       }
     }
 
-  return { links: [...normalizedLinks] };
+    return { links: [...normalizedLinks] };
   } catch (error) {
     const crawlerError = reportCrawlerError(
       error,

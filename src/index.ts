@@ -1,6 +1,6 @@
 import { crawl } from './crawler/crawl.js';
 import { normalizeUrl } from './crawler/url/normalizeUrl.js';
-import { resolveCrawlDelayMs } from './crawler/network/robots.js';
+import { loadRobotsPolicy } from './crawler/network/robots.js';
 import { createConfigurationError } from './errors.js';
 import {
   CrawlOptions,
@@ -32,11 +32,9 @@ export async function crawlOrchestrator(
   const url = validateStartUrl(startUrl);
   const options = resolveOptions(config);
 
-  if (config.crawlDelayMs === undefined) {
-    const robotsDelay = await resolveCrawlDelayMs(url, options.timeoutMs);
-    if (robotsDelay !== undefined) {
-      options.crawlDelayMs = robotsDelay;
-    }
+  const robots = await loadRobotsPolicy(url, options.timeoutMs);
+  if (config.crawlDelayMs === undefined && robots.crawlDelayMs !== undefined) {
+    options.crawlDelayMs = robots.crawlDelayMs;
   }
 
   const normalizedStart = normalizeUrl(url.href, url);
@@ -50,6 +48,7 @@ export async function crawlOrchestrator(
     normalizedStart,
     options,
     handlers: config.handlers,
+    robots,
   });
 }
 

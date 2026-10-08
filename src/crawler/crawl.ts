@@ -15,6 +15,7 @@ import {
   initializeStats,
   recordPageMetrics,
 } from './index.js';
+import { ALLOW_ALL, type RobotsPolicy } from './network/robots.js';
 import { ProgressReporter } from './reporting/progress.js';
 import { buildCrawlSummary } from './reporting/summary.js';
 import { createDefaultHandlers } from './handlers/defaultHandlers.js';
@@ -23,6 +24,7 @@ export interface CrawlRuntimeOptions {
   normalizedStart: string;
   options: CrawlOptions;
   handlers?: CrawlHandlers;
+  robots?: RobotsPolicy;
 }
 
 const MAX_ADDITIONAL_ATTEMPTS = 1; // Allow a single queue-level retry without obscuring the core flow.
@@ -47,11 +49,13 @@ class CrawlerEngine {
   private activeCount = 0;
   private runningCount = 0;
   private cancelled = false;
+  private nextRequestAt = 0;
 
   constructor(
     normalizedStart: string,
     private readonly options: CrawlOptions,
     private readonly handlers: CrawlHandlers,
+    private readonly robots: RobotsPolicy,
   ) {
     this.queue = new CrawlQueue(normalizedStart);
     this.stats = initializeStats(this.queue.pending);
@@ -132,6 +136,7 @@ class CrawlerEngine {
         this.runningCount,
       );
       try {
+        await this.waitForCrawlDelay();
         await this.handleItem(item);
       } finally {
         this.runningCount -= 1;
@@ -172,6 +177,21 @@ class CrawlerEngine {
     this.activePromises.add(task);
   }
 
+  /** Spaces request starts by crawlDelayMs, reserving slots so concurrent workers stay polite. */
+  private async waitForCrawlDelay(): Promise<void> {
+    const delay = this.options.crawlDelayMs;
+    if (delay <= 0) {
+      return;
+    }
+
+    const now = Date.now();
+    const startAt = Math.max(now, this.nextRequestAt);
+    this.nextRequestAt = startAt + delay;
+    if (startAt > now) {
+      await new Promise((resolve) => setTimeout(resolve, startAt - now));
+    }
+  }
+
   private async handleItem(item: CrawlQueueItem): Promise<void> {
     const outcome = await fetchPageWithRetry(item.url, this.options.timeoutMs);
     const pageBase = new URL(outcome.url);
@@ -209,6 +229,7 @@ class CrawlerEngine {
       depth: item.depth,
       queue: this.queue,
       stats: this.stats,
+      isAllowed: this.robots.isAllowed,
     });
 
     if (parseResult.error) {
@@ -283,14 +304,19 @@ class CrawlerEngine {
   }
 }
 
-export async function crawl({ normalizedStart, options, handlers }: CrawlRuntimeOptions): Promise<void> {
+export async function crawl({
+  normalizedStart,
+  options,
+  handlers,
+  robots = ALLOW_ALL,
+}: CrawlRuntimeOptions): Promise<void> {
   const effectiveHandlers: CrawlHandlers = {
     ...createDefaultHandlers(options.format),
     ...(handlers ?? {}),
   };
 
   setOutputConfig({ quiet: options.quiet, outputFile: options.outputFile, format: options.format });
-  const engine = new CrawlerEngine(normalizedStart, options, effectiveHandlers);
+  const engine = new CrawlerEngine(normalizedStart, options, effectiveHandlers, robots);
 
   try {
     const summary = await engine.run();

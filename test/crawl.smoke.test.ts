@@ -48,7 +48,7 @@ beforeAll(async () => {
 
     if (path === '/robots.txt') {
       res.setHeader('Content-Type', 'text/plain; charset=utf-8');
-      res.end('User-agent: *\nCrawl-delay: 1');
+      res.end('User-agent: *\nCrawl-delay: 1\nDisallow: /blog/post-2');
       return;
     }
 
@@ -117,6 +117,10 @@ describe('crawlOrchestrator smoke test', () => {
     expect(visitedUrls).toContain(`${baseUrl}/`);
     expect(visitedUrls).toContain(`${baseUrl}/blog`);
     expect(visitedUrls).not.toContain('https://example.com/external');
+    // Disallowed by robots.txt: still reported as a link, but never fetched.
+    expect(visitedUrls).not.toContain(`${baseUrl}/blog/post-2`);
+    const blogPage = visited.find((page) => page.url === `${baseUrl}/blog`);
+    expect(blogPage?.links).toContain(`${baseUrl}/blog/post-2`);
 
     const teamPage = visited.find((page) => page.url === `${baseUrl}/team`);
     expect(teamPage?.links).toContain(`${baseUrl}/`);

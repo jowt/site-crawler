@@ -15,7 +15,7 @@ export async function fetchPage(url: string, options: FetchPageOptions): Promise
       redirect: 'follow',
       signal: controller.signal,
       headers: {
-        'user-agent': 'monzo-crawler/1.0 (+https://github.com/monzo)',
+        'user-agent': 'site-crawler/1.0 (+https://github.com/jowt/site-crawler)',
         accept: 'text/html,application/xhtml+xml,*/*;q=0.9',
         'accept-encoding': 'gzip, deflate, br',
       },

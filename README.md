@@ -1,68 +1,86 @@
-# Monzo Web Crawler
+# site-crawler
 
-Single-subdomain crawler built on Node.js 22. It performs a breadth-first crawl using `p-limit` to limit concurrency, emits per-page output (or quiet progress summaries), and ignores links that leave the starting host/subdomain so the crawl remains on that subdomain.
+[![CI](https://github.com/jowt/site-crawler/actions/workflows/ci.yml/badge.svg)](https://github.com/jowt/site-crawler/actions/workflows/ci.yml)
 
-## How It Works
-- `src/cli.ts` parses CLI flags and hands configuration to `crawlOrchestrator`.
-- `src/index.ts` normalises the start URL, resolves (mocked) robots crawl-delay, and launches the crawl.
-- `src/crawler/crawl.ts` manages the BFS queue, concurrency control, retries, and stats.
-- `src/crawler/parsing/parseAndEnqueue.ts` extracts links with Cheerio, normalises them, filters to the same subdomain, and enqueues new work to be queued -> fetched -> parsed.
-- `src/util/output.ts` renders per-page logs or quiet-mode progress plus the final summary.
+A concurrent, polite web crawler for a single subdomain, written in TypeScript on Node.js 22.
+Given a start URL, it crawls breadth-first, stays on the starting host, honours `robots.txt`,
+and reports every page it visits with the links found on it, followed by a crawl summary.
 
-## Running the CLI
-Prerequisites: Node.js 22.x (or Docker image below) and npm 10.x.
+## Features
+
+- **Bounded concurrency** with `p-limit`, and a measured peak concurrency in the summary.
+- **Same-subdomain scope:** links to other hosts are reported but never followed.
+- **URL normalisation and de-duplication**, so `/blog`, `/blog/` and `/blog#top` are crawled once.
+- **robots.txt support:** `Allow` / `Disallow` with `*` and `$` wildcards (longest match wins),
+  user-agent groups, and `Crawl-delay`, which spaces request starts across all workers.
+- **Resilience:** per-request timeouts, one queue-level retry for transient failures, and a
+  failure log that shows which errors recovered on retry.
+- **Graceful cancellation:** Ctrl+C stops scheduling and still prints the summary.
+- **Quiet mode:** a throttled progress line instead of per-page output for large crawls.
+
+## How it works
+
+```text
+start URL ─► robots.txt ─► queue (BFS) ─► fetch (timeout, retry) ─► parse links (Cheerio)
+                              ▲                                          │
+                              └──── normalise, same host, allowed, new ◄─┘
+```
+
+| Module | Responsibility |
+| --- | --- |
+| `src/cli.ts` | Parses flags with Commander and builds the crawl config. |
+| `src/index.ts` | Validates the start URL, loads `robots.txt` and starts the crawl. |
+| `src/crawler/crawl.ts` | Runs the queue, concurrency, crawl delay, retries and stats. |
+| `src/crawler/network/robots.ts` | Parses `robots.txt` into an allow/deny policy and crawl delay. |
+| `src/crawler/parsing/parseAndEnqueue.ts` | Extracts, normalises, filters and enqueues links. |
+| `src/util/output.ts` | Per-page output, quiet-mode progress and the final summary. |
+
+## Usage
+
+Requires Node.js 22+ and npm 10+.
 
 ```bash
-# Install dependencies
 npm install
 
-# Crawl Monzo's demo site
-npm run dev -- crawl https://crawlme.monzo.com
+# Crawl a site
+npm run dev -- crawl https://example.com
 
-# Increase concurrency and hide per-page output
-npm run dev -- crawl https://crawlme.monzo.com --concurrency 256 --quiet
+# Higher concurrency with progress output only
+npm run dev -- crawl https://example.com --concurrency 64 --quiet
 
-# view failure handling with a limited timeout <200ms
-npm run dev -- crawl https://crawlme.monzo.com --concurrency 256 --quiet --timeout-ms 175 
-
-# Target the in-repo demo site (run node scripts/dev-site.mjs first)
+# Try it against the bundled demo site (run `node scripts/dev-site.mjs` first)
 npm run dev -- crawl http://localhost:3001 --max-pages 100
 ```
 
-## Fully Implemented Flags
-| Flag                      | Description                                   | Default |
-| ---                       | ---                                           | ---     |
-| `--concurrency <number>`  | Max in-flight fetches handled by `p-limit`.   | `8`     |
-| `--max-pages <number>`    | Hard stop on the number of pages crawled.     | unset   |
-| `--timeout-ms <number>`   | Per-request timeout before abort/retry.       | `2000`  |
-| `--quiet`                 | Collapse logs into a throttled progress line. | `false` |
+| Flag | Description | Default |
+| --- | --- | --- |
+| `--concurrency <n>` | Maximum in-flight requests. | `8` |
+| `--max-pages <n>` | Stop after this many pages. | unlimited |
+| `--timeout-ms <n>` | Per-request timeout before abort and retry. | `2000` |
+| `--crawl-delay-ms <n>` | Minimum gap between request starts. Overrides `robots.txt`. | from `robots.txt`, else `0` |
+| `--quiet` | Replace per-page output with a progress line. | off |
 
-## Placeholders for Future Iteration
-*No-op today, but preserved as were considered or removed from implementation.*
-- `--format json`, `--log-level`, `--output-file` — output hooks that now fall back to text console logging.
-- `--strip-tracking`, `--priority`, `--retries`, `--crawl-delay-ms`, `--dedupe-by-hash` — guardrails for future URL normalisation, prioritised queues, politeness knobs, and content hashing.
+### Docker
 
-## Development & Verification
-- Build TypeScript to `dist`: `npm run build`
-- Run unit/integration tests with coverage: `npm test`
-- Lint with ESLint flat config: `npm run lint`
-- Format via Prettier: `npm run format`
-
-Vitest smoke tests cover queue behaviour, URL normalisation, HTML parsing, robots handling, and error reporting.
-
-## Docker Support
 ```bash
-docker build -t monzo-crawler .
-docker run --rm monzo-crawler https://crawlme.monzo.com --concurrency 256 --quiet
+docker build -t site-crawler .
+docker run --rm site-crawler https://example.com --concurrency 32 --quiet
 ```
 
-The container entrypoint invokes the same `crawl` command; append flags as you would locally.
+## Development
 
-## Limitations & Possible Extensions
+```bash
+npm test         # Vitest unit and integration tests, with coverage
+npm run lint     # ESLint (flat config)
+npm run build    # Compile to dist/
+```
 
-- Implement placeholder flags listed above.
-- No robots.txt handling or crawl-delay politeness.
-- No adaptive throttling/backoff beyond a single retry for transient errors.
-- No dynamic rendering or JavaScript execution (HTML-only).
-- No persistence layer for very large crawls (everything is in-memory).
-- No graph export or sitemap output yet (possible additions: DOT exports, XML sitemaps).
+The integration test starts a local HTTP server and checks scope, de-duplication, `robots.txt`
+rules and summary statistics end to end. CI runs lint, type checks, tests and the build on every push.
+
+## Possible extensions
+
+- JSON output, file output and log levels (the flags are reserved in the CLI).
+- Tracking-parameter stripping and content-hash de-duplication.
+- Adaptive backoff on `429` / `503` responses, and `Retry-After` support.
+- Persistent queue for very large crawls, and sitemap or graph export.

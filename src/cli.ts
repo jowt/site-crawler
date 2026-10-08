@@ -18,7 +18,7 @@ async function beginExecution(startUrl: string, options: Record<string, unknown>
 const program = new Command();
 
 program
-  .name('monzo-crawler')
+  .name('site-crawler')
   .description('Crawl a single subdomain and report discovered internal links.')
   .version('0.0.0');
 
@@ -29,13 +29,13 @@ program
   // implemented flags
   .option('--concurrency <number>', 'Maximum number of concurrent requests. (default: 8)')
   .option('--max-pages <number>', 'Optional maximum number of pages to visit.')
-  .option('--timeout-ms <number>', 'Timeout per request in milliseconds. (default: 10000)')
+  .option('--timeout-ms <number>', 'Timeout per request in milliseconds. (default: 2000)')
   .option('--quiet', 'Suppress per-page text output and emit only periodic progress summaries.')
+  .option('--crawl-delay-ms <number>', 'Minimum gap between request starts; overrides robots.txt Crawl-delay.')
   // placeholder flags
   .option('--format <format>', 'Output format to emit (text or json). Defaults to text.')
   .option('--log-level <level>', 'Placeholder for future log verbosity control (currently ignored).')
   .option('--output-file <path>', 'Placeholder for file logging support (currently ignored).')
-  .option('--crawl-delay-ms <number>', 'Placeholder for per-host politeness throttling (currently ignored, robots mocked).')
   .option('--strip-tracking', 'Placeholder for removing tracking query parameters from emitted URLs.')
   .option('--priority <mode>', 'Placeholder for alternate queue strategies; crawler currently runs breadth-first (FIFO) regardless of mode.')
   .option('--dedupe-by-hash', 'Placeholder for content-hash deduplication to skip duplicate pages served from different URLs.')
@@ -76,7 +76,9 @@ function buildConfig(rawOptions: Record<string, unknown>): CrawlOrchestratorConf
     config.stripTracking = true;
   }
 
-  // Crawl-delay overrides would be coerced from rawOptions.crawlDelayMs when politeness is implemented.
+  if (rawOptions.crawlDelayMs !== undefined) {
+    config.crawlDelayMs = asNumber(rawOptions.crawlDelayMs, 'crawl-delay-ms');
+  }
 
   if (rawOptions.dedupeByHash === true) {
     config.dedupeByHash = true;
